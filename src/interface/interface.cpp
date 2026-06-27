@@ -389,18 +389,25 @@ void Interface::boucle_reel(std::stop_token stop) {
     ajouter_log("Mode reel demarre.");
 
     // Correction apprise coup après coup et persistée sur disque.
+    // Si pas de fichier de calibration : on part du decalage_doigt_y du config
+    // (valeur qui fait atterrir la pièce quelque part, même si pas exactement là).
     int correction_x = 0;
     int correction_y = 0;
     const std::string chemin_corr = std::string(std::getenv("HOME")) + "/ia_bb_correction.txt";
     {
         std::ifstream f(chemin_corr);
-        std::string cle; int val;
-        while (f >> cle >> val) {
-            if (cle == "correction_x") correction_x = val;
-            if (cle == "correction_y") correction_y = val;
+        if (f) {
+            std::string cle; int val;
+            while (f >> cle >> val) {
+                if (cle == "correction_x") correction_x = val;
+                if (cle == "correction_y") correction_y = val;
+            }
+            ajouter_log(std::format("Calibration chargee: corrX={} corrY={}", correction_x, correction_y));
+        } else {
+            correction_y = analyseur_.decalage_doigt_y();
+            ajouter_log(std::format("Pas de calibration — decalage initial corrY={}", correction_y));
         }
     }
-    ajouter_log(std::format("Calibration chargee: corrX={} corrY={}", correction_x, correction_y));
 
     while (!stop.stop_requested() && actif_) {
         // Capture
@@ -584,7 +591,13 @@ void Interface::boucle_reel(std::stop_token stop) {
                             }
                         }
                     } else {
-                        ajouter_log("ECHEC: grille inchangee (piece rejetee)");
+                        // Pièce rejetée (cellules occupées ou trop haut).
+                        // On augmente le décalage d'une demi-case pour descendre le doigt.
+                        correction_y += hc / 2;
+                        ajouter_log(std::format("ECHEC: piece rejetee -> corrY={}", correction_y));
+                        std::ofstream f(chemin_corr);
+                        f << "correction_x " << correction_x << "\n"
+                          << "correction_y " << correction_y << "\n";
                     }
 
                     // Sauver image après pour comparaison visuelle
