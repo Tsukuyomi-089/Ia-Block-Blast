@@ -1,0 +1,29 @@
+# ============================================================
+# ia_bb_config.txt  —  Calibration du mode réel IA Block Blast
+# ============================================================
+# Copiez ce fichier dans votre dossier personnel :  ~/ia_bb_config.txt
+# Puis cliquez "Connecter" dans l'appli pour le recharger.
+#
+# Valeurs mesurées pour une capture screencap de 1084×2412.
+# Vérifiez votre résolution avec :  adb shell wm size
+# Si elle diffère, mettez les pixels à l'échelle.
+
+# Grille 8×8  (x  y  largeur  hauteur)   en pixels écran
+grille 64 588 952 952
+
+# Centre de chaque pièce  (x  y)  — les 3 slots affichés en bas
+piece0 230 1831
+piece1 548 1836
+piece2 862 1831
+
+# Taille de la zone d'analyse autour de chaque centre (pixels)
+taille_piece 240
+
+# Seuil de saturation pour détecter une case remplie  (0.0–1.0)
+# Augmenter si l'IA voit des cases pleines qui sont vides, diminuer sinon.
+seuil 0.25
+
+# Décalage vertical de pose (pixels) : Block Blast affiche la pièce AU-DESSUS
+# du doigt. Le doigt doit donc viser plus bas que la case cible.
+# Point de départ ≈ 1,2 case. Augmenter si la pièce se pose trop haut.
+decalage_doigt_y 143
