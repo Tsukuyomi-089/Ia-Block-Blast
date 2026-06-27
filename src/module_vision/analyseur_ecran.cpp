@@ -104,8 +104,15 @@ bool AnalyseurEcran::cellule_remplie(const cv::Mat& cellule) const {
     cv::cvtColor(cellule, hsv, cv::COLOR_BGR2HSV);
     std::vector<cv::Mat> canaux;
     cv::split(hsv, canaux);
-    double moy = cv::mean(canaux[1])[0];
-    return (moy / 255.0) > config_.seuil_remplissage;
+    // Utilise S×V plutôt que S seule :
+    //   fond marron vide → S≈0.45, V≈0.35 → S×V≈0.16 (sous le seuil)
+    //   pièce colorée    → S≈0.70, V≈0.80 → S×V≈0.56 (au-dessus)
+    //   fond cyan clair  → S≈0.15, V≈0.85 → S×V≈0.13 (sous le seuil)
+    // Fonctionne pour tous les thèmes du jeu.
+    double moy_s = cv::mean(canaux[1])[0];
+    double moy_v = cv::mean(canaux[2])[0];
+    double chroma = (moy_s / 255.0) * (moy_v / 255.0);
+    return chroma > config_.seuil_remplissage;
 }
 
 Grille AnalyseurEcran::extraire_grille(const cv::Mat& region) const {
@@ -226,13 +233,16 @@ std::optional<AnalyseEcran> AnalyseurEcran::analyser(const cv::Mat& capture) con
         cv::morphologyEx(masque, masque, cv::MORPH_CLOSE, noyau);
 
         cv::Rect bbox_local = cv::boundingRect(masque);
+        bool slot_present = (bbox_local.area() > 80);
+        analyse.pieces_presentes[i] = slot_present;
+
         // Convertir bbox en coordonnées image complète
-        analyse.bbox_pieces[i] = (bbox_local.area() > 80)
+        analyse.bbox_pieces[i] = slot_present
             ? cv::Rect(z.x + bbox_local.x, z.y + bbox_local.y,
                        bbox_local.width,   bbox_local.height)
             : z;  // fallback: zone entière
 
-        analyse.pieces[i] = detecter_piece(region);
+        analyse.pieces[i] = slot_present ? detecter_piece(region) : catalogue_pieces()[0];
     }
 
     analyse.valide = true;

@@ -1,8 +1,20 @@
 #include "interface.hpp"
 #include <chrono>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <sstream>
+
+namespace {
+    // Racine du projet déterminée à la compilation via __FILE__
+    // __FILE__ = .../src/interface/interface.cpp → remonter 3 niveaux
+    const std::string RACINE_PROJET =
+        std::filesystem::path(__FILE__).parent_path()  // interface/
+                                       .parent_path()  // src/
+                                       .parent_path()  // project root
+                                       .string();
+    const std::string CHEMIN_LOG = RACINE_PROJET + "/ia_bb.log";
+}
 
 namespace {
     cv::Scalar FOND         {25,  25,  25};
@@ -39,6 +51,8 @@ void Interface::ajouter_log(const std::string& msg) {
     journal_.push_front(msg);
     while (static_cast<int>(journal_.size()) > MAX_LIGNES_LOG)
         journal_.pop_back();
+    std::ofstream f(CHEMIN_LOG, std::ios::app);
+    if (f) f << msg << "\n";
 }
 
 void Interface::dessiner_bouton(const std::string& texte, cv::Rect zone,
@@ -440,16 +454,90 @@ void Interface::boucle_reel(std::stop_token stop) {
         EtatJeu etat;
         etat.grille           = resultat->grille;
         etat.pieces_courantes = resultat->pieces;
-        etat.pieces_utilisees.fill(false);
         etat.score    = 0;
         etat.termine  = false;
         etat.nb_coups = 0;
+        // Marquer les slots vides (pièce déjà jouée) comme utilisés
+        for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i)
+            etat.pieces_utilisees[i] = !resultat->pieces_presentes[i];
+
+        {
+            int nb_present = 0;
+            std::string slots;
+            for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i) {
+                if (resultat->pieces_presentes[i]) {
+                    slots += std::format("P{}={} ", i, etat.pieces_courantes[i].nom);
+                    ++nb_present;
+                }
+            }
+            if (nb_present < NB_PIECES_SIMULTANEES)
+                ajouter_log(std::format("Slots: {} ({}/3 presents)", slots, nb_present));
+        }
 
         // Choisir le meilleur coup
         auto coup = agent_courant_.choisir_coup(etat);
         if (coup.index_piece < 0) {
-            ajouter_log("Aucun coup possible — partie terminee ?");
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            int nb_remplis = 0;
+            std::string carte;
+            for (int r = 0; r < TAILLE_GRILLE; ++r) {
+                for (int c = 0; c < TAILLE_GRILLE; ++c) {
+                    bool plein = etat.grille.est_remplie(r, c);
+                    carte += plein ? '#' : '.';
+                    if (plein) ++nb_remplis;
+                }
+                carte += '|';
+            }
+            ajouter_log(std::format("Aucun coup ({}/64 pleines) pieces: {} {} {}",
+                nb_remplis,
+                etat.pieces_courantes[0].nom,
+                etat.pieces_courantes[1].nom,
+                etat.pieces_courantes[2].nom));
+            ajouter_log("Grille: " + carte);
+
+            // Diagnostic HSV : log les valeurs S*V réelles de chaque cellule
+            // pour trouver le bon seuil
+            {
+                const cv::Rect& zone = resultat->zone_grille;
+                int lc2 = zone.width  / TAILLE_GRILLE;
+                int hc2 = zone.height / TAILLE_GRILLE;
+                cv::Mat region_hsv;
+                cv::cvtColor(capture(zone), region_hsv, cv::COLOR_BGR2HSV);
+                std::vector<cv::Mat> canaux;
+                cv::split(region_hsv, canaux);
+
+                double sv_min = 1.0, sv_max = 0.0;
+                std::string sv_carte;
+                for (int r = 0; r < TAILLE_GRILLE; ++r) {
+                    for (int c = 0; c < TAILLE_GRILLE; ++c) {
+                        cv::Rect z(c*lc2+4, r*hc2+4, lc2-8, hc2-8);
+                        z &= cv::Rect(0, 0, region_hsv.cols, region_hsv.rows);
+                        double mS = cv::mean(canaux[1](z))[0] / 255.0;
+                        double mV = cv::mean(canaux[2](z))[0] / 255.0;
+                        double sv = mS * mV;
+                        sv_min = std::min(sv_min, sv);
+                        sv_max = std::max(sv_max, sv);
+                        sv_carte += std::format("{:.2f} ", sv);
+                    }
+                    ajouter_log(std::format("HSV L{}: {}", r, sv_carte));
+                    sv_carte.clear();
+                }
+                ajouter_log(std::format("S*V range: min={:.3f} max={:.3f} seuil={:.2f}",
+                    sv_min, sv_max, analyseur_.seuil_remplissage()));
+
+                // Image de debug
+                cv::Mat dbg = capture.clone();
+                cv::rectangle(dbg, zone, {0,255,0}, 3);
+                for (int r = 0; r < TAILLE_GRILLE; ++r)
+                    for (int c = 0; c < TAILLE_GRILLE; ++c)
+                        if (etat.grille.est_remplie(r, c))
+                            cv::rectangle(dbg,
+                                {zone.x+c*lc2+2, zone.y+r*hc2+2, lc2-4, hc2-4},
+                                {0,0,200}, -1);
+                const std::string dp = std::string(std::getenv("HOME")) + "/ia_bb_debug.png";
+                cv::imwrite(dp, dbg);
+            }
+
+            std::this_thread::sleep_for(std::chrono::seconds(3));
             continue;
         }
 
@@ -483,130 +571,110 @@ void Interface::boucle_reel(std::stop_token stop) {
         int dest_x = zone.x + (coup.colonne + ancre.colonne) * lc + lc / 2 + correction_x;
         int dest_y = zone.y + (coup.ligne   + ancre.ligne)   * hc + hc / 2 + correction_y;
 
-        // Image de debug annotée
-        {
-            const std::string debug_path = std::string(std::getenv("HOME")) + "/ia_bb_debug.png";
-            cv::Mat dbg = capture.clone();
+        // Boucle d'essais : si la pièce est rejetée (cases occupées / trop haut),
+        // on descend le doigt d'une demi-case à chaque essai (offset temporaire).
+        // La correction persistée n'est mise à jour QU'APRÈS un atterrissage réussi.
+        const std::string chemin_apres = "/tmp/ia_bb_apres.png";
+        const std::string debug_path   = std::string(std::getenv("HOME")) + "/ia_bb_debug.png";
+        const int MAX_ESSAIS = 6;
+        bool pose_reussie = false;
 
-            // Grille
-            cv::rectangle(dbg, zone, {0,255,0}, 3);
-            for (int r = 0; r <= TAILLE_GRILLE; ++r) {
-                cv::line(dbg, {zone.x, zone.y+r*hc}, {zone.x+zone.width, zone.y+r*hc}, {0,180,0}, 1);
-                cv::line(dbg, {zone.x+r*lc, zone.y}, {zone.x+r*lc, zone.y+zone.height}, {0,180,0}, 1);
+        for (int essai = 0; essai < MAX_ESSAIS && !pose_reussie; ++essai) {
+            int offset_essai = essai * (hc / 2);
+            int eff_dest_x   = dest_x;
+            int eff_dest_y   = dest_y + offset_essai;
+
+            // Image de debug annotée (mise à jour à chaque essai)
+            {
+                cv::Mat dbg = capture.clone();
+                cv::rectangle(dbg, zone, {0,255,0}, 3);
+                for (int r = 0; r <= TAILLE_GRILLE; ++r) {
+                    cv::line(dbg, {zone.x, zone.y+r*hc}, {zone.x+zone.width, zone.y+r*hc}, {0,180,0}, 1);
+                    cv::line(dbg, {zone.x+r*lc, zone.y}, {zone.x+r*lc, zone.y+zone.height}, {0,180,0}, 1);
+                }
+                for (int r = 0; r < TAILLE_GRILLE; ++r)
+                    for (int c = 0; c < TAILLE_GRILLE; ++c)
+                        if (etat.grille.est_remplie(r, c))
+                            cv::rectangle(dbg, {zone.x+c*lc+2, zone.y+r*hc+2, lc-4, hc-4}, {0,0,200}, -1);
+                for (const auto& cell : piece.cellules) {
+                    int tr = coup.ligne + cell.ligne, tc = coup.colonne + cell.colonne;
+                    cv::rectangle(dbg, {zone.x+tc*lc+4, zone.y+tr*hc+4, lc-8, hc-8}, {0,255,0}, 3);
+                }
+                int ar = coup.ligne + ancre.ligne, ac = coup.colonne + ancre.colonne;
+                cv::rectangle(dbg, {zone.x+ac*lc+8, zone.y+ar*hc+8, lc-16, hc-16}, {255,0,0}, 3);
+                cv::rectangle(dbg, bbox, {255,165,0}, 3);
+                cv::circle(dbg, {grab_x, grab_y}, 15, {0,165,255}, -1);
+                cv::circle(dbg, {eff_dest_x, eff_dest_y}, 18, {0,255,255}, -1);
+                cv::putText(dbg, std::format("doigt({},{}) e{}", eff_dest_x, eff_dest_y, essai+1),
+                    {eff_dest_x+5, eff_dest_y-5}, cv::FONT_HERSHEY_SIMPLEX, 0.7, {0,255,255}, 2);
+                for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i) {
+                    cv::rectangle(dbg, resultat->bbox_pieces[i], {200,100,50}, 2);
+                    cv::putText(dbg, std::format("P{}", i),
+                        {resultat->bbox_pieces[i].x, resultat->bbox_pieces[i].y-5},
+                        cv::FONT_HERSHEY_SIMPLEX, 1.2, {200,100,50}, 2);
+                }
+                cv::imwrite(debug_path, dbg);
             }
 
-            // Cases remplies (rouge)
+            ajouter_log(std::format("Essai {}/{} P{} {} grab({},{}) L{}C{} dest({},{})+{}",
+                essai+1, MAX_ESSAIS, coup.index_piece, piece.nom,
+                grab_x, grab_y, coup.ligne, coup.colonne,
+                eff_dest_x, eff_dest_y, offset_essai));
+
+            adb_.glisser(grab_x, grab_y, eff_dest_x, eff_dest_y, 700);
+
+            // Attendre l'animation (2s au premier essai, 1.5s pour les suivants)
+            std::this_thread::sleep_for(std::chrono::milliseconds(essai == 0 ? 2500 : 1500));
+
+            if (!adb_.capturer_ecran(chemin_apres)) continue;
+            cv::Mat apres = cv::imread(chemin_apres);
+            if (apres.empty()) continue;
+            auto res_apres = analyseur_.analyser(apres);
+            if (!res_apres) continue;
+
+            std::string nouvelles;
+            int nb = 0;
+            int pose_min_r = TAILLE_GRILLE, pose_min_c = TAILLE_GRILLE;
             for (int r = 0; r < TAILLE_GRILLE; ++r)
                 for (int c = 0; c < TAILLE_GRILLE; ++c)
-                    if (etat.grille.est_remplie(r, c))
-                        cv::rectangle(dbg,
-                            {zone.x+c*lc+2, zone.y+r*hc+2, lc-4, hc-4},
-                            {0,0,200}, -1);
-
-            // Empreinte cible de la pièce (cases à remplir) en vert vif
-            for (const auto& cell : piece.cellules) {
-                int tr = coup.ligne   + cell.ligne;
-                int tc = coup.colonne + cell.colonne;
-                cv::rectangle(dbg,
-                    {zone.x+tc*lc+4, zone.y+tr*hc+4, lc-8, hc-8},
-                    {0,255,0}, 3);
-            }
-
-            // Point doigt (position envoyée à ADB) en jaune
-            cv::circle(dbg, {dest_x, dest_y}, 18, {0,255,255}, -1);
-            cv::putText(dbg,
-                std::format("doigt({},{})", dest_x, dest_y),
-                {dest_x+5, dest_y-5}, cv::FONT_HERSHEY_SIMPLEX, 0.7, {0,255,255}, 2);
-
-            // Cellule cible de l'ancre (en bleu) pour vérification
-            {
-                int ar = coup.ligne   + ancre.ligne;
-                int ac = coup.colonne + ancre.colonne;
-                cv::rectangle(dbg,
-                    {zone.x+ac*lc+8, zone.y+ar*hc+8, lc-16, hc-16},
-                    {255,0,0}, 3);
-            }
-
-            // Bbox pièce + grab
-            cv::rectangle(dbg, bbox, {255,165,0}, 3);
-            cv::circle(dbg, {grab_x, grab_y}, 15, {0,165,255}, -1);
-
-            // Labels pièces
-            for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i) {
-                cv::rectangle(dbg, resultat->bbox_pieces[i], {200,100,50}, 2);
-                cv::putText(dbg, std::format("P{}", i),
-                            {resultat->bbox_pieces[i].x, resultat->bbox_pieces[i].y-5},
-                            cv::FONT_HERSHEY_SIMPLEX, 1.2, {200,100,50}, 2);
-            }
-
-            cv::imwrite(debug_path, dbg);
-        }
-
-        ajouter_log(std::format("P{} {} grab({},{}) L{}C{} dest({},{})",
-            coup.index_piece, piece.nom,
-            grab_x, grab_y, coup.ligne, coup.colonne, dest_x, dest_y));
-
-        adb_.glisser(grab_x, grab_y, dest_x, dest_y, 700);
-
-        // Attendre la fin de l'animation Block Blast
-        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
-
-        // Capture de vérification : voir où la pièce a réellement atterri
-        const std::string chemin_apres = "/tmp/ia_bb_apres.png";
-        if (adb_.capturer_ecran(chemin_apres)) {
-            cv::Mat apres = cv::imread(chemin_apres);
-            if (!apres.empty()) {
-                auto res_apres = analyseur_.analyser(apres);
-                if (res_apres) {
-                    std::string nouvelles;
-                    int nb = 0;
-                    int pose_min_r = TAILLE_GRILLE, pose_min_c = TAILLE_GRILLE;
-                    for (int r = 0; r < TAILLE_GRILLE; ++r)
-                        for (int c = 0; c < TAILLE_GRILLE; ++c)
-                            if (!resultat->grille.est_remplie(r, c) &&
-                                 res_apres->grille.est_remplie(r, c)) {
-                                nouvelles += std::format("({},{})", r, c);
-                                pose_min_r = std::min(pose_min_r, r);
-                                pose_min_c = std::min(pose_min_c, c);
-                                ++nb;
-                            }
-                    if (nb > 0) {
-                        ajouter_log(std::format("Pose OK {} nb={}", nouvelles, nb));
-                        // Auto-calibration : ajuster la correction si la pièce n'est pas
-                        // au bon endroit (et qu'aucune ligne n'a été effacée, sinon nb peut
-                        // être trop faible pour comparer).
-                        if (nb >= static_cast<int>(piece.cellules.size())) {
-                            int err_r = pose_min_r - coup.ligne;
-                            int err_c = pose_min_c - coup.colonne;
-                            if (err_r != 0 || err_c != 0) {
-                                correction_y -= err_r * hc;
-                                correction_x -= err_c * lc;
-                                ajouter_log(std::format(
-                                    "Calibration: erreur L{:+d}C{:+d} -> corrY={} corrX={}",
-                                    err_r, err_c, correction_y, correction_x));
-                                // Persister sur disque pour les prochaines sessions
-                                std::ofstream f(chemin_corr);
-                                f << "correction_x " << correction_x << "\n"
-                                  << "correction_y " << correction_y << "\n";
-                            }
-                        }
-                    } else {
-                        // Pièce rejetée (cellules occupées ou trop haut).
-                        // On augmente le décalage d'une demi-case pour descendre le doigt.
-                        correction_y += hc / 2;
-                        ajouter_log(std::format("ECHEC: piece rejetee -> corrY={}", correction_y));
-                        std::ofstream f(chemin_corr);
-                        f << "correction_x " << correction_x << "\n"
-                          << "correction_y " << correction_y << "\n";
+                    if (!resultat->grille.est_remplie(r, c) &&
+                         res_apres->grille.est_remplie(r, c)) {
+                        nouvelles += std::format("({},{})", r, c);
+                        pose_min_r = std::min(pose_min_r, r);
+                        pose_min_c = std::min(pose_min_c, c);
+                        ++nb;
                     }
 
-                    // Sauver image après pour comparaison visuelle
-                    const std::string out = std::string(std::getenv("HOME")) + "/ia_bb_apres.png";
-                    cv::imwrite(out, apres);
+            if (nb > 0) {
+                ajouter_log(std::format("Pose OK essai{} {} nb={}", essai+1, nouvelles, nb));
+                pose_reussie = true;
+
+                // Calibration : intégrer l'offset utilisé + l'erreur de position mesurée.
+                // Objectif : correction_y doit faire atterrir directement à coup.ligne.
+                if (nb >= static_cast<int>(piece.cellules.size())) {
+                    int err_r = pose_min_r - coup.ligne;
+                    int err_c = pose_min_c - coup.colonne;
+                    // L'offset_essai a été nécessaire pour atterrir → l'intégrer au correction
+                    correction_y += offset_essai - err_r * hc;
+                    correction_x -= err_c * lc;
+                    ajouter_log(std::format(
+                        "Calibration: essai{} offset={} errL{:+d}C{:+d} -> corrY={} corrX={}",
+                        essai+1, offset_essai, err_r, err_c, correction_y, correction_x));
+                    std::ofstream f(chemin_corr);
+                    f << "correction_x " << correction_x << "\n"
+                      << "correction_y " << correction_y << "\n";
                 }
+
+                const std::string out = std::string(std::getenv("HOME")) + "/ia_bb_apres.png";
+                cv::imwrite(out, apres);
+            } else {
+                ajouter_log(std::format("Essai {} rejete", essai+1));
             }
-        }
-    }
+        } // for (essai)
+
+        if (!pose_reussie)
+            ajouter_log("ECHEC total: piece rejetee 6 fois");
+    } // while (actif_)
 
     actif_ = false;
 }
