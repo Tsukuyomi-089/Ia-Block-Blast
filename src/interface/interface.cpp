@@ -271,6 +271,8 @@ void Interface::demarrer_reel() {
         ajouter_log("Erreur: aucun appareil connecte.");
         return;
     }
+    // Vider le fichier log à chaque nouvelle session
+    { std::ofstream f(CHEMIN_LOG, std::ios::trunc); }
     actif_ = true;
     ajouter_log("Mode reel demarre.");
     fil_reel_ = std::jthread([this](std::stop_token stop) {
@@ -402,6 +404,11 @@ void Interface::boucle_reel(std::stop_token stop) {
     const std::string chemin_capture = "/tmp/ia_bb_capture.png";
     ajouter_log("Mode reel demarre.");
 
+    // Pièces blacklistées cette session : si une pièce échoue 6 fois de suite,
+    // on la marque comme "utilisée" pour forcer l'agent à essayer une autre pièce.
+    // Reset global quand un coup réussit ou quand toutes les pièces sont blacklistées.
+    std::array<bool, NB_PIECES_SIMULTANEES> pieces_bloquees{false, false, false};
+
     // Correction apprise coup après coup et persistée sur disque.
     // Si pas de fichier de calibration : on part du decalage_doigt_y du config
     // (valeur qui fait atterrir la pièce quelque part, même si pas exactement là).
@@ -460,18 +467,24 @@ void Interface::boucle_reel(std::stop_token stop) {
         // Marquer les slots vides (pièce déjà jouée) comme utilisés
         for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i)
             etat.pieces_utilisees[i] = !resultat->pieces_presentes[i];
+        // Blacklist pièces : si une pièce a complètement échoué (6 rejets),
+        // on la marque utilisée pour forcer l'agent à essayer une autre pièce.
+        for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i)
+            if (pieces_bloquees[i]) etat.pieces_utilisees[i] = true;
 
         {
-            int nb_present = 0;
+            // Log toujours l'état des 3 slots pour diagnostiquer les détections fausses
             std::string slots;
+            int nb_present = 0;
             for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i) {
                 if (resultat->pieces_presentes[i]) {
                     slots += std::format("P{}={} ", i, etat.pieces_courantes[i].nom);
                     ++nb_present;
+                } else {
+                    slots += std::format("P{}=VIDE ", i);
                 }
             }
-            if (nb_present < NB_PIECES_SIMULTANEES)
-                ajouter_log(std::format("Slots: {} ({}/3 presents)", slots, nb_present));
+            ajouter_log(std::format("Slots ({}/3): {}", nb_present, slots));
         }
 
         // Choisir le meilleur coup
@@ -537,6 +550,8 @@ void Interface::boucle_reel(std::stop_token stop) {
                 cv::imwrite(dp, dbg);
             }
 
+            // Lever les blacklists : peut-être qu'elles cachaient des pièces valides
+            pieces_bloquees.fill(false);
             std::this_thread::sleep_for(std::chrono::seconds(3));
             continue;
         }
@@ -567,9 +582,14 @@ void Interface::boucle_reel(std::stop_token stop) {
         int grab_y = int(bbox.y + (ancre.ligne   + 0.5f) * ch);
 
         // Destination : la cellule d'ancrage doit atterrir en (coup.ligne+ancre.ligne, coup.colonne+ancre.colonne)
-        // + correction apprise par auto-calibration après chaque coup
-        int dest_x = zone.x + (coup.colonne + ancre.colonne) * lc + lc / 2 + correction_x;
-        int dest_y = zone.y + (coup.ligne   + ancre.ligne)   * hc + hc / 2 + correction_y;
+        // + correction apprise par auto-calibration après chaque coup.
+        // On clample dans les limites de la grille pour éviter que le doigt sorte du bord.
+        int dest_x_base = zone.x + (coup.colonne + ancre.colonne) * lc + lc / 2 + correction_x;
+        int dest_y_base = zone.y + (coup.ligne   + ancre.ligne)   * hc + hc / 2 + correction_y;
+        dest_x_base = std::clamp(dest_x_base, zone.x + lc/2, zone.x + zone.width  - lc/2);
+        dest_y_base = std::clamp(dest_y_base, zone.y + hc/2, zone.y + zone.height - hc/2);
+        int dest_x = dest_x_base;
+        int dest_y = dest_y_base;
 
         // Boucle d'essais : si la pièce est rejetée (cases occupées / trop haut),
         // on descend le doigt d'une demi-case à chaque essai (offset temporaire).
@@ -582,7 +602,8 @@ void Interface::boucle_reel(std::stop_token stop) {
         for (int essai = 0; essai < MAX_ESSAIS && !pose_reussie; ++essai) {
             int offset_essai = essai * (hc / 2);
             int eff_dest_x   = dest_x;
-            int eff_dest_y   = dest_y + offset_essai;
+            int eff_dest_y   = std::min(dest_y + offset_essai,
+                                        zone.y + zone.height - hc / 2);
 
             // Image de debug annotée (mise à jour à chaque essai)
             {
@@ -672,8 +693,25 @@ void Interface::boucle_reel(std::stop_token stop) {
             }
         } // for (essai)
 
-        if (!pose_reussie)
-            ajouter_log("ECHEC total: piece rejetee 6 fois");
+        if (pose_reussie) {
+            // Coup réussi : lever toutes les blacklists
+            pieces_bloquees.fill(false);
+        } else {
+            ajouter_log(std::format("ECHEC total: blacklist P{}", coup.index_piece));
+            pieces_bloquees[coup.index_piece] = true;
+
+            // Si toutes les pièces présentes sont bloquées → blocage total
+            bool toutes_bloquees = true;
+            for (int i = 0; i < NB_PIECES_SIMULTANEES; ++i)
+                if (resultat->pieces_presentes[i] && !pieces_bloquees[i])
+                    toutes_bloquees = false;
+
+            if (toutes_bloquees) {
+                ajouter_log("Toutes les pieces bloquees, attente 10s...");
+                pieces_bloquees.fill(false);
+                std::this_thread::sleep_for(std::chrono::seconds(10));
+            }
+        }
     } // while (actif_)
 
     actif_ = false;

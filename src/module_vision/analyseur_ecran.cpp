@@ -99,6 +99,34 @@ void AnalyseurEcran::definir_config(const ConfigVision& config) {
 
 // ─── Détection de grille ──────────────────────────────────────────────────────
 
+cv::Mat AnalyseurEcran::masque_piece_vs_fond(const cv::Mat& region) {
+    // Échantillonne les 4 coins (10×10 px) pour estimer la couleur de fond.
+    // Les pièces sont toujours centrées dans la zone, les coins sont du fond pur.
+    int m = 10;
+    int W = region.cols, H = region.rows;
+    cv::Scalar fond =
+        (cv::mean(region(cv::Rect(0,   0,   m, m))) +
+         cv::mean(region(cv::Rect(W-m, 0,   m, m))) +
+         cv::mean(region(cv::Rect(0,   H-m, m, m))) +
+         cv::mean(region(cv::Rect(W-m, H-m, m, m)))) * 0.25;
+
+    // Pixels qui s'écartent du fond de plus de 35 (BGR L∞)
+    cv::Mat diff;
+    cv::absdiff(region,
+                cv::Mat(region.size(), region.type(), fond),
+                diff);
+    cv::Mat gris;
+    cv::cvtColor(diff, gris, cv::COLOR_BGR2GRAY);
+    cv::Mat masque;
+    cv::threshold(gris, masque, 35, 255, cv::THRESH_BINARY);
+
+    // Éliminer le bruit et boucher les trous
+    cv::Mat k = cv::getStructuringElement(cv::MORPH_RECT, {3, 3});
+    cv::morphologyEx(masque, masque, cv::MORPH_OPEN,  k);
+    cv::morphologyEx(masque, masque, cv::MORPH_CLOSE, k);
+    return masque;
+}
+
 bool AnalyseurEcran::cellule_remplie(const cv::Mat& cellule) const {
     cv::Mat hsv;
     cv::cvtColor(cellule, hsv, cv::COLOR_BGR2HSV);
@@ -121,10 +149,15 @@ Grille AnalyseurEcran::extraire_grille(const cv::Mat& region) const {
 
     int lc = region.cols / TAILLE_GRILLE;
     int hc = region.rows / TAILLE_GRILLE;
+    // Marge de 28% : on ne regarde que le centre de la case.
+    // Les pièces ont un dégradé d'ombre en bas/côtés (S*V faible),
+    // mais leur CENTRE est toujours vif. Le fond est uniforme partout.
+    int mx = lc * 28 / 100;
+    int my = hc * 28 / 100;
 
     for (int r = 0; r < TAILLE_GRILLE; ++r) {
         for (int c = 0; c < TAILLE_GRILLE; ++c) {
-            cv::Rect z(c * lc + 2, r * hc + 2, lc - 4, hc - 4);
+            cv::Rect z(c * lc + mx, r * hc + my, lc - 2*mx, hc - 2*my);
             z &= cv::Rect(0, 0, region.cols, region.rows);
             if (z.width <= 0 || z.height <= 0) continue;
             if (cellule_remplie(region(z))) {
@@ -143,15 +176,8 @@ Piece AnalyseurEcran::detecter_piece(const cv::Mat& region) const {
     if (region.empty() || region.rows < 20 || region.cols < 20)
         return cat[0];
 
-    // Masque des pixels colorés — seuil 120 pour exclure le fond cyan du bac (sat≈94)
-    cv::Mat hsv, masque;
-    cv::cvtColor(region, hsv, cv::COLOR_BGR2HSV);
-    cv::inRange(hsv, cv::Scalar(0, 95, 80), cv::Scalar(180, 255, 255), masque);
-
-    // Nettoyer le bruit
-    cv::Mat noyau = cv::getStructuringElement(cv::MORPH_RECT, {3, 3});
-    cv::morphologyEx(masque, masque, cv::MORPH_OPEN,  noyau);
-    cv::morphologyEx(masque, masque, cv::MORPH_CLOSE, noyau);
+    // Masque : pixels qui s'écartent du fond (coins) → isole la pièce
+    cv::Mat masque = masque_piece_vs_fond(region);
 
     cv::Rect bbox = cv::boundingRect(masque);
     if (bbox.area() < 80) return cat[0];
@@ -222,25 +248,21 @@ std::optional<AnalyseEcran> AnalyseurEcran::analyser(const cv::Mat& capture) con
             continue;
         }
 
-        // Calculer le bbox réel de la pièce dans la zone
+        // Masque : soustraction du fond (coins de la zone) → isole la pièce
         cv::Mat region = capture(z);
-        cv::Mat hsv, masque;
-        cv::cvtColor(region, hsv, cv::COLOR_BGR2HSV);
-        // Seuil 120/255 : exclut le fond cyan du bac (sat≈94), garde les pièces (sat≈155+)
-        cv::inRange(hsv, cv::Scalar(0, 95, 80), cv::Scalar(180, 255, 255), masque);
-        cv::Mat noyau = cv::getStructuringElement(cv::MORPH_RECT, {3, 3});
-        cv::morphologyEx(masque, masque, cv::MORPH_OPEN,  noyau);
-        cv::morphologyEx(masque, masque, cv::MORPH_CLOSE, noyau);
+        cv::Mat masque = masque_piece_vs_fond(region);
 
-        cv::Rect bbox_local = cv::boundingRect(masque);
-        bool slot_present = (bbox_local.area() > 80);
+        // Slot présent si la pièce occupe plus de 300 pixels distincts du fond
+        bool slot_present = (cv::countNonZero(masque) > 300);
         analyse.pieces_presentes[i] = slot_present;
 
-        // Convertir bbox en coordonnées image complète
-        analyse.bbox_pieces[i] = slot_present
-            ? cv::Rect(z.x + bbox_local.x, z.y + bbox_local.y,
-                       bbox_local.width,   bbox_local.height)
-            : z;  // fallback: zone entière
+        if (slot_present) {
+            cv::Rect bbox_local = cv::boundingRect(masque);
+            analyse.bbox_pieces[i] = cv::Rect(z.x + bbox_local.x, z.y + bbox_local.y,
+                                               bbox_local.width,   bbox_local.height);
+        } else {
+            analyse.bbox_pieces[i] = z;
+        }
 
         analyse.pieces[i] = slot_present ? detecter_piece(region) : catalogue_pieces()[0];
     }

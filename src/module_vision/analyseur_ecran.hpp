@@ -48,4 +48,7 @@ private:
     Grille extraire_grille(const cv::Mat& region) const;
     bool   cellule_remplie(const cv::Mat& cellule) const;
     Piece  detecter_piece(const cv::Mat& region_piece) const;
+    // Masque "pièce vs fond" : soustrait la couleur des coins (fond uniforme)
+    // pour isoler uniquement les pixels de la pièce, quel que soit le thème.
+    static cv::Mat masque_piece_vs_fond(const cv::Mat& region);
 };
