@@ -527,9 +527,13 @@ void Interface::boucle_reel(std::stop_token stop) {
                         double mS = cv::mean(canaux[1](z))[0] / 255.0;
                         double mV = cv::mean(canaux[2](z))[0] / 255.0;
                         double sv = mS * mV;
+                        cv::Scalar moy_v, std_v;
+                        cv::meanStdDev(canaux[2](z), moy_v, std_v);
+                        double stdv = std_v[0] / 255.0;
                         sv_min = std::min(sv_min, sv);
                         sv_max = std::max(sv_max, sv);
-                        sv_carte += std::format("{:.2f} ", sv);
+                        // Format: SV/STDV pour identifier les pièces sombres
+                        sv_carte += std::format("{:.2f}/{:.2f} ", sv, stdv);
                     }
                     ajouter_log(std::format("HSV L{}: {}", r, sv_carte));
                     sv_carte.clear();
@@ -583,11 +587,14 @@ void Interface::boucle_reel(std::stop_token stop) {
 
         // Destination : la cellule d'ancrage doit atterrir en (coup.ligne+ancre.ligne, coup.colonne+ancre.colonne)
         // + correction apprise par auto-calibration après chaque coup.
-        // On clample dans les limites de la grille pour éviter que le doigt sorte du bord.
+        // Le doigt peut dépasser le bas de la grille : avec le lift visuel, la pièce
+        // apparaît ~200px AU-DESSUS du doigt. Pour les rangées basses, le doigt doit
+        // donc aller SOUS la grille. On le limite seulement à ~100px au-dessus du plateau.
+        int max_doigt_y = resultat->positions_pieces[0].y - 100;
         int dest_x_base = zone.x + (coup.colonne + ancre.colonne) * lc + lc / 2 + correction_x;
         int dest_y_base = zone.y + (coup.ligne   + ancre.ligne)   * hc + hc / 2 + correction_y;
-        dest_x_base = std::clamp(dest_x_base, zone.x + lc/2, zone.x + zone.width  - lc/2);
-        dest_y_base = std::clamp(dest_y_base, zone.y + hc/2, zone.y + zone.height - hc/2);
+        dest_x_base = std::clamp(dest_x_base, zone.x + lc/2, zone.x + zone.width - lc/2);
+        dest_y_base = std::clamp(dest_y_base, zone.y + hc/2, max_doigt_y);
         int dest_x = dest_x_base;
         int dest_y = dest_y_base;
 
@@ -599,11 +606,16 @@ void Interface::boucle_reel(std::stop_token stop) {
         const int MAX_ESSAIS = 6;
         bool pose_reussie = false;
 
+        // Offsets sur des incréments d'une case entière : couvre ±3 rangées autour de la cible.
+        // Le premier essai est sans offset (corrY seul). Si ça rate, on monte/descend d'une case
+        // à la fois pour trouver la bonne rangée et calibrer corrY automatiquement.
+        const std::array<int, MAX_ESSAIS> offsets_essais = {0, hc, -hc, 2*hc, -2*hc, 3*hc};
+
         for (int essai = 0; essai < MAX_ESSAIS && !pose_reussie; ++essai) {
-            int offset_essai = essai * (hc / 2);
+            int offset_essai = offsets_essais[essai];
             int eff_dest_x   = dest_x;
-            int eff_dest_y   = std::min(dest_y + offset_essai,
-                                        zone.y + zone.height - hc / 2);
+            int eff_dest_y   = std::clamp(dest_y + offset_essai,
+                                          zone.y + hc/2, max_doigt_y);
 
             // Image de debug annotée (mise à jour à chaque essai)
             {
@@ -644,7 +656,7 @@ void Interface::boucle_reel(std::stop_token stop) {
 
             adb_.glisser(grab_x, grab_y, eff_dest_x, eff_dest_y, 700);
 
-            // Attendre l'animation (2s au premier essai, 1.5s pour les suivants)
+            // Attendre la fin de l'animation de pose
             std::this_thread::sleep_for(std::chrono::milliseconds(essai == 0 ? 2500 : 1500));
 
             if (!adb_.capturer_ecran(chemin_apres)) continue;
@@ -672,7 +684,7 @@ void Interface::boucle_reel(std::stop_token stop) {
 
                 // Calibration : intégrer l'offset utilisé + l'erreur de position mesurée.
                 // Objectif : correction_y doit faire atterrir directement à coup.ligne.
-                if (nb >= static_cast<int>(piece.cellules.size())) {
+                if (nb >= 1) {
                     int err_r = pose_min_r - coup.ligne;
                     int err_c = pose_min_c - coup.colonne;
                     // L'offset_essai a été nécessaire pour atterrir → l'intégrer au correction

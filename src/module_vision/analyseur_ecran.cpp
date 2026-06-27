@@ -132,15 +132,19 @@ bool AnalyseurEcran::cellule_remplie(const cv::Mat& cellule) const {
     cv::cvtColor(cellule, hsv, cv::COLOR_BGR2HSV);
     std::vector<cv::Mat> canaux;
     cv::split(hsv, canaux);
-    // Utilise S×V plutôt que S seule :
-    //   fond marron vide → S≈0.45, V≈0.35 → S×V≈0.16 (sous le seuil)
-    //   pièce colorée    → S≈0.70, V≈0.80 → S×V≈0.56 (au-dessus)
-    //   fond cyan clair  → S≈0.15, V≈0.85 → S×V≈0.13 (sous le seuil)
-    // Fonctionne pour tous les thèmes du jeu.
-    double moy_s = cv::mean(canaux[1])[0];
-    double moy_v = cv::mean(canaux[2])[0];
-    double chroma = (moy_s / 255.0) * (moy_v / 255.0);
-    return chroma > config_.seuil_remplissage;
+
+    double moy_s = cv::mean(canaux[1])[0] / 255.0;
+    double moy_v = cv::mean(canaux[2])[0] / 255.0;
+
+    // Test 1 : pièce vive (rouge, jaune, vert…) — S×V élevé
+    if (moy_s * moy_v > config_.seuil_remplissage) return true;
+
+    // Test 2 : pièce sombre (bleu marine, violet…) — S×V faible mais présence d'un
+    // dégradé highlight→ombre caractéristique de toute pièce Block Blast.
+    // Un fond uniforme a un écart-type V ≈ 0.01, une pièce ≈ 0.05+.
+    cv::Scalar moy_ch, ecart_ch;
+    cv::meanStdDev(canaux[2], moy_ch, ecart_ch);
+    return (ecart_ch[0] / 255.0) > 0.04;
 }
 
 Grille AnalyseurEcran::extraire_grille(const cv::Mat& region) const {
