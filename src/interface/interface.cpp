@@ -539,8 +539,7 @@ void Interface::boucle_reel(std::stop_token stop) {
             coup.index_piece, piece.nom,
             grab_x, grab_y, coup.ligne, coup.colonne, dest_x, dest_y));
 
-        // Geste en 2 phases : hold 350ms (pièce grossit/se sélectionne) + move 500ms
-        adb_.glisser_avec_selection(grab_x, grab_y, dest_x, dest_y, 350, 500);
+        adb_.glisser(grab_x, grab_y, dest_x, dest_y, 700);
 
         // Attendre la fin de l'animation Block Blast
         std::this_thread::sleep_for(std::chrono::milliseconds(2500));
