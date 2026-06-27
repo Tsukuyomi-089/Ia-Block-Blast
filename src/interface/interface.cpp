@@ -678,24 +678,28 @@ void Interface::boucle_reel(std::stop_token stop) {
                         ++nb;
                     }
 
-            if (nb > 0) {
-                ajouter_log(std::format("Pose OK essai{} {} nb={}", essai+1, nouvelles, nb));
+            // Vérification secondaire : si le slot est maintenant vide, la pièce a quitté
+            // le plateau → placement accepté par le jeu, même si la détection grille rate
+            // (pièces sombres ou trop petites pour que le stddev soit détecté).
+            bool slot_vide_apres = !res_apres->pieces_presentes[coup.index_piece];
+            if (slot_vide_apres && nb == 0)
+                ajouter_log(std::format("Pose OK essai{} (slot vide, grille non detectee)", essai+1));
+
+            if (nb > 0 || slot_vide_apres) {
+                if (nb > 0)
+                    ajouter_log(std::format("Pose OK essai{} {} nb={}", essai+1, nouvelles, nb));
                 pose_reussie = true;
 
-                // Calibration : intégrer l'offset utilisé + l'erreur de position mesurée.
-                // Objectif : correction_y doit faire atterrir directement à coup.ligne.
+                // Calibration désactivée : la détection des pièces sombres est trop
+                // imprécise pour mesurer pose_min_r/c correctement. Une mauvaise mesure
+                // fait exploser corrY/corrX en quelques coups. On utilise les valeurs
+                // fixes du fichier ~/ia_bb_correction.txt à la place.
                 if (nb >= 1) {
                     int err_r = pose_min_r - coup.ligne;
                     int err_c = pose_min_c - coup.colonne;
-                    // L'offset_essai a été nécessaire pour atterrir → l'intégrer au correction
-                    correction_y += offset_essai - err_r * hc;
-                    correction_x -= err_c * lc;
                     ajouter_log(std::format(
-                        "Calibration: essai{} offset={} errL{:+d}C{:+d} -> corrY={} corrX={}",
-                        essai+1, offset_essai, err_r, err_c, correction_y, correction_x));
-                    std::ofstream f(chemin_corr);
-                    f << "correction_x " << correction_x << "\n"
-                      << "correction_y " << correction_y << "\n";
+                        "Pose verifiee: essai{} offset={} errL{:+d}C{:+d} (corrY={} fixe)",
+                        essai+1, offset_essai, err_r, err_c, correction_y));
                 }
 
                 const std::string out = std::string(std::getenv("HOME")) + "/ia_bb_apres.png";
