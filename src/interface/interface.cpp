@@ -1,6 +1,7 @@
 #include "interface.hpp"
 #include <chrono>
 #include <format>
+#include <fstream>
 #include <sstream>
 
 namespace {
@@ -387,10 +388,19 @@ void Interface::boucle_reel(std::stop_token stop) {
     const std::string chemin_capture = "/tmp/ia_bb_capture.png";
     ajouter_log("Mode reel demarre.");
 
-    // Correction apprise coup après coup par comparaison avant/après.
-    // Démarre à 0 : le point jaune du debug = position exacte de la cellule cible.
+    // Correction apprise coup après coup et persistée sur disque.
     int correction_x = 0;
     int correction_y = 0;
+    const std::string chemin_corr = std::string(std::getenv("HOME")) + "/ia_bb_correction.txt";
+    {
+        std::ifstream f(chemin_corr);
+        std::string cle; int val;
+        while (f >> cle >> val) {
+            if (cle == "correction_x") correction_x = val;
+            if (cle == "correction_y") correction_y = val;
+        }
+    }
+    ajouter_log(std::format("Calibration chargee: corrX={} corrY={}", correction_x, correction_y));
 
     while (!stop.stop_requested() && actif_) {
         // Capture
@@ -529,7 +539,8 @@ void Interface::boucle_reel(std::stop_token stop) {
             coup.index_piece, piece.nom,
             grab_x, grab_y, coup.ligne, coup.colonne, dest_x, dest_y));
 
-        adb_.glisser(grab_x, grab_y, dest_x, dest_y, 700);
+        // Geste en 2 phases : hold 350ms (pièce grossit/se sélectionne) + move 500ms
+        adb_.glisser_avec_selection(grab_x, grab_y, dest_x, dest_y, 350, 500);
 
         // Attendre la fin de l'animation Block Blast
         std::this_thread::sleep_for(std::chrono::milliseconds(2500));
@@ -567,6 +578,10 @@ void Interface::boucle_reel(std::stop_token stop) {
                                 ajouter_log(std::format(
                                     "Calibration: erreur L{:+d}C{:+d} -> corrY={} corrX={}",
                                     err_r, err_c, correction_y, correction_x));
+                                // Persister sur disque pour les prochaines sessions
+                                std::ofstream f(chemin_corr);
+                                f << "correction_x " << correction_x << "\n"
+                                  << "correction_y " << correction_y << "\n";
                             }
                         }
                     } else {
